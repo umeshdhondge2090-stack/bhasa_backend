@@ -11,11 +11,12 @@ WORKDIR $HOME/app
 COPY --chown=user requirements.txt .
 RUN pip install --no-cache-dir --user -r requirements.txt
 
-# Copy backend, model weights, and built frontend
+# Copy backend and model files
 COPY --chown=user Hindi_Mundari_MT5/ ./Hindi_Mundari_MT5/
-COPY --chown=user BhashaSetu/dist/ ./dist/
 COPY --chown=user server.py .
 
+ENV PORT=7860
 EXPOSE 7860
 
-CMD ["uvicorn", "server:app", "--host", "0.0.0.0", "--port", "7860"]
+CMD ["sh", "-c", "uvicorn server:app --host 0.0.0.0 --port ${PORT:-7860}"]
+
