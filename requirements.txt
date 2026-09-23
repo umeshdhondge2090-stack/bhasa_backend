@@ -1,8 +1,10 @@
-torch
-transformers
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+torch==2.7.1+cpu
+transformers==4.53.3
+tokenizers==0.21.2
 sentencepiece
-protobuf
+safetensors
 fastapi
-uvicorn
+uvicorn[standard]
 edge-tts
-pydantic
