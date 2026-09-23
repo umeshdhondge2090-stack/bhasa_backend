@@ -9,14 +9,16 @@ ENV HOME=/home/user \
 WORKDIR $HOME/app
 
 COPY --chown=user requirements.txt .
-RUN pip install --no-cache-dir --user -r requirements.txt
+# Install CPU-only torch to save 3GB disk space and prevent massive RAM overhead
+RUN pip install --no-cache-dir --user torch --index-url https://download.pytorch.org/whl/cpu && \
+    pip install --no-cache-dir --user -r requirements.txt
 
 # Copy backend and model files
 COPY --chown=user Hindi_Mundari_MT5/ ./Hindi_Mundari_MT5/
 COPY --chown=user server.py .
 
-ENV PORT=7860
-EXPOSE 7860
+ENV PORT=10000
+EXPOSE 10000
 
-CMD ["sh", "-c", "uvicorn server:app --host 0.0.0.0 --port ${PORT:-7860}"]
+CMD ["sh", "-c", "uvicorn server:app --host 0.0.0.0 --port ${PORT:-10000}"]
 

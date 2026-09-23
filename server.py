@@ -2,12 +2,10 @@ import os
 import sys
 import io
 import asyncio
-import torch
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from pydantic import BaseModel
-from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
 import edge_tts
 
 sys.stdout.reconfigure(encoding='utf-8')
@@ -24,20 +22,78 @@ app.add_middleware(
 )
 
 MODEL_DIR = os.environ.get("MODEL_DIR", os.path.join(os.path.dirname(__file__), "Hindi_Mundari_MT5"))
-device = "cuda" if torch.cuda.is_available() else "cpu"
-
+device = "cpu"
 tokenizer = None
 model = None
 
-try:
-    print(f"Loading mT5 Hindi-Mundari model on {device} from {MODEL_DIR}...")
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_DIR)
-    model = AutoModelForSeq2SeqLM.from_pretrained(MODEL_DIR).to(device)
-    model.eval()
-    print("Model loaded and ready for inference!")
-except Exception as e:
-    print(f"Notice: Model weights could not be loaded from '{MODEL_DIR}': {e}")
-    print("Server starting in API-ready fallback mode.")
+def get_system_ram_mb() -> float:
+    """Detect available container RAM (Docker cgroup v1/v2 or OS sysconf)."""
+    # Docker cgroup v2
+    try:
+        if os.path.exists("/sys/fs/cgroup/memory.max"):
+            with open("/sys/fs/cgroup/memory.max", "r") as f:
+                val = f.read().strip()
+                if val.isdigit():
+                    return int(val) / (1024 * 1024)
+    except Exception:
+        pass
+    # Docker cgroup v1
+    try:
+        if os.path.exists("/sys/fs/cgroup/memory/memory.limit_in_bytes"):
+            with open("/sys/fs/cgroup/memory/memory.limit_in_bytes", "r") as f:
+                val = f.read().strip()
+                if val.isdigit():
+                    limit = int(val)
+                    if limit < (1024 * 1024 * 1024 * 1024):
+                        return limit / (1024 * 1024)
+    except Exception:
+        pass
+    # Linux sysconf
+    try:
+        pages = os.sysconf('SC_PHYS_PAGES')
+        page_size = os.sysconf('SC_PAGE_SIZE')
+        return (pages * page_size) / (1024 * 1024)
+    except Exception:
+        pass
+    return 4096.0
+
+def init_model():
+    """Load model if sufficient RAM (>= 1.5GB) and weight files exist; otherwise stay in lightweight mode."""
+    global tokenizer, model, device
+    force_load = os.environ.get("FORCE_LOAD_MODEL", "false").lower() == "true"
+    ram_mb = get_system_ram_mb()
+
+    if ram_mb < 1500 and not force_load:
+        print(f"[Resource Guard] Available RAM is ~{int(ram_mb)}MB (e.g. Render Free Tier 512MB).")
+        print("[Resource Guard] Skipping 1.2GB mT5 in-memory model to avoid Out-Of-Memory kill.")
+        print("[Resource Guard] Server running in lightweight mode with Neural TTS & API fallback.")
+        return
+
+    # Check for weights file before loading PyTorch
+    weights_found = any(
+        os.path.exists(os.path.join(MODEL_DIR, fname))
+        for fname in ["model.safetensors", "pytorch_model.bin"]
+    )
+    if not weights_found and not force_load:
+        print(f"[Model Loader] No weights found in '{MODEL_DIR}'. Running in lightweight fallback mode.")
+        return
+
+    try:
+        import torch
+        from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        print(f"[Model Loader] Loading mT5 model on {device} from {MODEL_DIR}...")
+        tokenizer = AutoTokenizer.from_pretrained(MODEL_DIR)
+        model = AutoModelForSeq2SeqLM.from_pretrained(MODEL_DIR).to(device)
+        model.eval()
+        print("[Model Loader] mT5 model loaded successfully and ready for inference!")
+    except Exception as e:
+        print(f"[Model Loader] Could not load model: {e}")
+        tokenizer = None
+        model = None
+
+# Initialize on boot
+init_model()
 
 
 # Ol Chiki -> Phonetic Devanagari transliteration map for Santhali speech
@@ -129,7 +185,8 @@ def status():
     return {
         "status": "online",
         "model_loaded": model is not None,
-        "model": "mT5 Hindi-Mundari" if model is not None else "Offline Fallback Mode",
+        "mode": "full_ml_model" if model is not None else "lightweight_mode",
+        "system_ram_mb": int(get_system_ram_mb()),
         "device": device,
         "features": ["translation", "neural-tts", "ol-chiki-phonetics"],
         "vocab_size": tokenizer.vocab_size if tokenizer is not None else 0
@@ -162,6 +219,7 @@ def translate(req: TranslationRequest):
         )
 
     try:
+        import torch
         inputs = tokenizer(clean_text, return_tensors="pt").to(device)
         with torch.no_grad():
             outputs = model.generate(
